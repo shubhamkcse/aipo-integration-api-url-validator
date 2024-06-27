@@ -1,0 +1,7 @@
+com\aipo\url\AipoIntegrationApiUrlValidatorApplication.class
+com\aipo\url\model\UrlResponse$UrlResponseBuilder.class
+com\aipo\url\controller\URLController.class
+com\aipo\url\restclient\RestClientConfig$1.class
+com\aipo\url\restclient\RestClientConfig.class
+com\aipo\url\model\UrlResponse.class
+com\aipo\url\service\URLService.class
