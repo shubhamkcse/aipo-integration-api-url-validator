@@ -17,9 +17,10 @@ pipeline {
         }
         stage('Deploy') {
             steps {
-                withMaven(maven : 'maven_3_9_8'){
-                    sh 'mvn deploy
-                    }
+                script {
+                    // Corrected sh step with proper string termination
+                    sh 'mvn deploy'
+                }
             }
         }
     }
