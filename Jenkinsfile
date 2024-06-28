@@ -3,14 +3,14 @@ pipeline {
     stages {
         stage('Build') {
             steps {
-                script {
+                witMaven(maven : 'maven_3_9_8') {
                     sh 'mvn clean compile'
                 }
             }
         }
         stage('Test') {
             steps {
-                script {
+                witMaven(maven : 'maven_3_9_8') {
                     sh 'mvn test'
                 }
             }
