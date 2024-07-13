@@ -4,6 +4,9 @@ trigger:
 pool:
   vmImage: 'ubuntu-latest'
 
+variables:
+  javaVersion: '11'
+
 stages:
 - stage: Build
   displayName: 'Build Stage'
@@ -17,9 +20,8 @@ stages:
         goals: 'clean install'
         options: '-B'
         javaHomeOption: 'JDKVersion'
-        jdkVersionOption: '1.11'
+        jdkVersionOption: '$(javaVersion)'
         mavenVersionOption: 'Default'
-        mavenAuthenticateFeed: true
 
 - stage: Test
   displayName: 'Test Stage'
@@ -34,9 +36,8 @@ stages:
         goals: 'test'
         options: '-B'
         javaHomeOption: 'JDKVersion'
-        jdkVersionOption: '1.11'
+        jdkVersionOption: '$(javaVersion)'
         mavenVersionOption: 'Default'
-        mavenAuthenticateFeed: true
 
 - stage: Deploy
   displayName: 'Deploy Stage'
