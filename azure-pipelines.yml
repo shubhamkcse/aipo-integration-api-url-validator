@@ -2,7 +2,7 @@ trigger:
 - main
 
 pool:
-  name: 'Self-Hosted Pool'
+  name: 'self pool'
 
 variables:
   javaVersion: '11'
