@@ -1,28 +1,22 @@
 # Use Maven to build the application
-FROM maven:3.9.8-openjdk-11 AS build
+FROM maven:3.8.5-openjdk-11 AS build
 
 # Set the working directory
 WORKDIR /app
 
-# Copy the pom.xml and download dependencies
+# Copy the pom.xml and download the dependencies
 COPY pom.xml .
-RUN mvn dependency:go-offline -B
+RUN mvn dependency:go-offline
 
 # Copy the source code and build the application
 COPY src ./src
-RUN mvn package -DskipTests
+RUN mvn package
 
-# Use a lighter image to run the application
-FROM openjdk:11-jdk-slim
+# Use a minimal base image for the final artifact
+FROM openjdk:11-jre-slim
 
-# Set the working directory
-WORKDIR /app
+# Copy the JAR file from the build stage
+COPY --from=build /app/target/my-app.jar /app/my-app.jar
 
-# Copy the built JAR file from the build stage
-COPY --from=build /app/target/my-app-0.0.1-SNAPSHOT.jar ./my-app.jar
-
-# Expose the application port
-EXPOSE 8080
-
-# Command to run the application
-CMD ["java", "-jar", "my-app.jar"]
+# Set the entry point
+ENTRYPOINT ["java", "-jar", "/app/my-app.jar"]
