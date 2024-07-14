@@ -1,72 +1,34 @@
 trigger:
-- main  # Trigger on changes to the main branch
+- main
 
 pool:
-  name: 'Self-hosted pool'  # Use a self-hosted agent pool or a Microsoft-hosted pool as per your setup
+  name: 'Self-hosted pool'
 
 variables:
-  javaVersion: '11'
+  imageName: 'my-app'
 
-stages:
-- stage: Build
-  displayName: 'Build Stage'
-  jobs:
-  - job: BuildJob
-    displayName: 'Build Job'
-    steps:
-    - task: Maven@3
-      inputs:
-        mavenPomFile: 'pom.xml'
-        goals: 'clean install'
-        options: '-B'
-        javaHomeOption: 'JDKVersion'
-        jdkVersionOption: '$(javaVersion)'
-        mavenVersionOption: 'Default'
+steps:
+- task: DockerInstaller@0
+  inputs:
+    dockerVersion: '4.31.1'
 
-- stage: Test
-  displayName: 'Test Stage'
-  dependsOn: Build
-  jobs:
-  - job: TestJob
-    displayName: 'Test Job'
-    steps:
-    - task: Maven@3
-      inputs:
-        mavenPomFile: 'pom.xml'
-        goals: 'test'
-        options: '-B'
-        javaHomeOption: 'JDKVersion'
-        jdkVersionOption: '$(javaVersion)'
-        mavenVersionOption: 'Default'
+- script: |
+    docker build -t $(imageName) .
+    docker tag $(imageName) shubhamkdev/$(imageName):$(Build.BuildId)
+    docker login -u $(dockerUsername) -p $(dockerPassword)
+    docker push shubhamkdev/$(imageName):$(Build.BuildId)
+  displayName: 'Build and Push Docker Image'
 
-- stage: DeployToDev
-  displayName: 'Deploy to Dev Stage'
-  dependsOn: Test
-  condition: succeeded()  # Deploy only if previous stages (Test) succeed
-  jobs:
-  - deployment: DeployToDevJob
-    displayName: 'Deploy to Dev'
-    environment: 'Dev'
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-          - script: echo 'Deploying to Dev environment...'
-            displayName: 'Deploy steps'
-          # Add deployment steps for Dev environment, e.g., Azure App Service, Kubernetes, etc.
+- script: |
+    kubectl set image deployment/my-app-deployment my-app=shubhamkdev/$(imageName):$(Build.BuildId)
+  displayName: 'Deploy to Kubernetes'
+  env:
+    KUBECONFIG: $(kubeconfig)
 
-- stage: DeployToProd
-  displayName: 'Deploy to Prod Stage'
-  dependsOn: Test
-  condition: succeeded()  # Deploy only if previous stages (Test) succeed
-  jobs:
-  - deployment: DeployToProdJob
-    displayName: 'Deploy to Production'
-    environment: 'Production'
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-          - script: echo 'Deploying to Production environment...'
-            displayName: 'Deploy steps'
-          # Add deployment steps for Production environment, e.g., Azure App Service, Kubernetes, etc.
+- task: Kubernetes@1
+  inputs:
+    connectionType: 'Kubeconfig'
+    kubeconfig: '$(kubeconfig)'
+    command: 'apply'
+    arguments: '-f deployment.yaml -f service.yaml'
+  displayName: 'Apply Kubernetes Manifests'
