@@ -1,8 +1,8 @@
 trigger:
-- main
+- main  # Trigger on changes to the main branch
 
 pool:
-  name: 'Self-hosted pool'
+  name: 'Self-hosted pool'  # Use a self-hosted agent pool or a Microsoft-hosted pool as per your setup
 
 variables:
   javaVersion: '11'
@@ -39,19 +39,34 @@ stages:
         jdkVersionOption: '$(javaVersion)'
         mavenVersionOption: 'Default'
 
-- stage: Deploy
-  displayName: 'Deploy Stage'
+- stage: DeployToDev
+  displayName: 'Deploy to Dev Stage'
   dependsOn: Test
-  condition: succeeded()
+  condition: succeeded()  # Deploy only if previous stages (Test) succeed
   jobs:
-  - deployment: DeployJob
-    displayName: 'Deploy Job'
+  - deployment: DeployToDevJob
+    displayName: 'Deploy to Dev'
+    environment: 'Dev'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: echo 'Deploying to Dev environment...'
+            displayName: 'Deploy steps'
+          # Add deployment steps for Dev environment, e.g., Azure App Service, Kubernetes, etc.
+
+- stage: DeployToProd
+  displayName: 'Deploy to Prod Stage'
+  dependsOn: Test
+  condition: succeeded()  # Deploy only if previous stages (Test) succeed
+  jobs:
+  - deployment: DeployToProdJob
+    displayName: 'Deploy to Production'
     environment: 'Production'
     strategy:
       runOnce:
         deploy:
           steps:
-          - script: echo 'Deploying to Production...'
+          - script: echo 'Deploying to Production environment...'
             displayName: 'Deploy steps'
-          # Add your deployment steps here, e.g., using SSH, Azure CLI, etc.
-  
+          # Add deployment steps for Production environment, e.g., Azure App Service, Kubernetes, etc.
