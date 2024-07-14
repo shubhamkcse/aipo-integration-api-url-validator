@@ -10,7 +10,7 @@ variables:
 steps:
 - task: DockerInstaller@0
   inputs:
-    dockerVersion: '4.31.1'
+    dockerVersion: '26.1.4'
 
 - script: |
     docker build -t $(imageName) .
