@@ -1,0 +1,440 @@
+    @GetMapping("/ava/aipo/live/dashboard/api/ticket-acknowledge-time")
+    public ResponseEntity<ResponsePayload> getMeanTimeToAcknowledge(
+            @RequestParam(name = "timeframe") String timeframe) {
+        ResponsePayload responsePayload = liveDashboardService.getIssueAcknowledge(timeframe);
+        return new ResponseEntity<>(responsePayload, responsePayload.getHttpStatus());
+    }
+
+
+---------------------------------------------------
+service.classs
+
+public ResponsePayload getIssueAcknowledge(String timeframe) {
+        log.info("getIssueAcknowledge() start.");
+        ResponsePayload responsePayload = new ResponsePayload();
+        try {
+            DateRange dateRange = utilService.calculateDateRange(timeframe);
+            LocalDate startDate = dateRange.getStartDate();
+            LocalDate endDate = dateRange.getEndDate().plusDays(1);
+            log.info("Entering getIssueAcknowledge method with timeframe: {}, startDate: {}, endDate: {}", timeframe, startDate, endDate);
+
+            List<AIPOBaseRecord> dbAlerts = mongoRepo.findAlertsByTimeFrame(startDate, endDate, collectionName);
+            log.info("dB alerts count: {}", dbAlerts.size());
+
+            List<AIPOBaseRecord> filterAlerts = Optional.of(dbAlerts)
+                    .map(list -> list.stream()
+                            .filter(rec -> {
+                                String status = rec.getRecord().get("Status").toString();
+                                return !(status.equals("Closed"));
+                            })
+                            .sorted(Comparator.comparing(AIPOBaseRecord::getTimestamp).reversed())
+                            .collect(Collectors.toList()))
+                    .orElse(Collections.emptyList());
+            long totalNoOfAlerts = filterAlerts.size();
+            log.info("Filter dB alerts count: {}", totalNoOfAlerts);
+
+            SlaTicketData meanTimeToAcknowledgeAlerts = utilService.calculateMeanTimeToAcknowledge(filterAlerts);
+            SlaTicketData meanTimeToResolutionAlerts = utilService.calculateMeanTimeToResolution(filterAlerts, meanTimeToAcknowledgeAlerts.getBreachedIncidentId());
+            AlertsSlaData alertsSlaData = responseTransformer.alertsMapToAlertSlaResponse(meanTimeToAcknowledgeAlerts, meanTimeToResolutionAlerts, totalNoOfAlerts);
+            responsePayload.setAlertsSlaData(alertsSlaData);
+            responsePayload.setHttpStatus(HttpStatus.OK);
+            log.info("Successfully calculate ticket mine time to acknowledge");
+        } catch (Exception e) {
+            log.error("Error while fetching alerts from dB", e);
+            responsePayload.setMessage("Exception occurred while fetching ticket Acknowledge data.");
+            responsePayload.setHttpStatus(HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+        log.info("getIssueAcknowledge() end.");
+        return responsePayload;
+    }
+
+
+
+------------------------------------------
+
+UtilService.classs
+
+public class UtilService {
+
+    @Autowired
+    SlaCalculator slaCalculator;
+
+    public DateRange calculateDateRange(String timeframe) {
+        LocalDate today = LocalDate.now();
+        LocalDate startDate = today;
+
+        if (StringUtils.hasLength(timeframe)) {
+            startDate = getStartDate(timeframe);
+        }
+
+        return new DateRange(startDate, today);
+    }
+
+    private LocalDate getStartDate(String timeframe) {
+        LocalDate today = LocalDate.now();
+        int daysToSubtract = 6;
+
+        if ("1Day".equalsIgnoreCase(timeframe)) {
+            daysToSubtract = 1;
+        } else if ("2Days".equalsIgnoreCase(timeframe)) {
+            daysToSubtract = 2;
+        } else if ("3Days".equalsIgnoreCase(timeframe)) {
+            daysToSubtract = 3;
+        } else if ("4Days".equalsIgnoreCase(timeframe)) {
+            daysToSubtract = 4;
+        } else if ("5Days".equalsIgnoreCase(timeframe)) {
+            daysToSubtract = 5;
+        }
+        return today.minusDays(daysToSubtract);
+    }
+
+    public SlaTicketData calculateMeanTimeToAcknowledge(List<AIPOBaseRecord> alerts) {
+        log.info("calculateMeanTimeToAcknowledge() start.");
+        ZonedDateTime now = ZonedDateTime.now();
+        long totalMinutes;
+        long avgTime = 0;
+        int breachedCount = 0;
+
+        SlaTicketData slaTicketData = new SlaTicketData();
+        List<AlertData> alertDataList = new ArrayList<>();
+        List<String> breachedIncidentId = new ArrayList<>();
+
+        for (AIPOBaseRecord alert : alerts) {
+            if (alert.getRecord() != null) {
+                Map<String, Object> records = alert.getRecord();
+                String incidentId = (String) records.get("IncidentId");
+                Date createDate = (Date) records.get("Created_Date");
+                String priority = (String) records.get("Priority");
+                Date updateDate = "Undefined".equalsIgnoreCase(records.get("Updated_Date").toString())
+                        ? null
+                        : (Date) records.get("Updated_Date");
+                int allowedTime = getAcknowledgeTimeByPriority(priority.toLowerCase());
+                if (createDate != null) {
+                    ZonedDateTime createDateTime = ZonedDateTime.ofInstant(createDate.toInstant(), ZoneId.systemDefault());
+                    int slaHours = allowedTime / 60;
+                    ZonedDateTime breachDateTime = slaCalculator.calculateBreachDateTime(createDateTime, slaHours);
+                    Duration duration = Duration.between(createDateTime, now);
+                    long breachMinutes = duration.toMinutes();
+
+                    if (updateDate != null) {
+                        ZonedDateTime updateDateTime = ZonedDateTime.ofInstant(updateDate.toInstant(), ZoneId.systemDefault());
+                        if (updateDateTime.isBefore(breachDateTime)) {
+                            Duration between = Duration.between(createDateTime, updateDateTime);
+                            avgTime += between.toMinutes();
+                            continue;
+                        } else {
+                            breachedCount++;
+                            breachedIncidentId.add(incidentId);
+                            continue;
+                        }
+                    }
+
+                    totalMinutes = allowedTime - breachMinutes;
+                    if (totalMinutes > 0) {
+                        String formattedTime = formatDuration(totalMinutes);
+                        AlertData alertData = new AlertData();
+                        alertData.setIncidentId(incidentId);
+                        alertData.setTimeToAcknowledge(formattedTime);
+
+                        alertDataList.add(alertData);
+                    } else {
+                        breachedIncidentId.add(incidentId);
+                        breachedCount++;
+                    }
+                }
+            }
+        }
+
+        slaTicketData.setBreachedIncidentId(breachedIncidentId);
+        log.info("calculateMeanTimeToAcknowledge() Breached incident ids: {}", breachedIncidentId);
+        slaTicketData.setAlertData(alertDataList);
+        slaTicketData.setNoOfBreachedTicket(breachedCount);
+        slaTicketData.setAvgResponseTime(alerts.size() > 0 ? avgTime / alerts.size() : 25);
+        //slaTicketDataMap.put("SlaTicketData", slaTicketData);
+
+        String logMessage = "Number of issues Acknowledge Time Breached: ";
+        log.info(logMessage + breachedCount);
+        log.info("calculateMeanTimeToAcknowledge() end.");
+        return slaTicketData;
+    }
+
+    public SlaTicketData calculateMeanTimeToResolution(List<AIPOBaseRecord> alerts, List<String> breachedIncidentId) {
+        log.info("calculateMeanTimeToResolution() start.");
+        ZonedDateTime now = ZonedDateTime.now();
+        long totalMinutes;
+        long avgTime = 0;
+        int breachedCount = 0;
+
+        SlaTicketData slaTicketData = new SlaTicketData();
+        List<AlertData> alertDataList = new ArrayList<>();
+        List<String> notResolvedBreachedIncidentId = new ArrayList<>();
+
+        for (AIPOBaseRecord alert : alerts) {
+            if (alert.getRecord() != null) {
+                Map<String, Object> records = alert.getRecord();
+                String incidentId = (String) records.get("IncidentId");
+                Date createDate = (Date) records.get("Created_Date");
+                String priority = (String) records.get("Priority");
+                //String
+                Date updateDate = "Undefined".equalsIgnoreCase(records.get("Updated_Date").toString())
+                        ? null
+                        : (Date) records.get("Updated_Date");
+                Date resolutionDate = !"Undefined".equalsIgnoreCase(records.get("Resolution_Date").toString())
+                        ? (Date) records.get("Resolution_Date")
+                        : null;
+                int allowedTime = getResolveTimeByPriority(priority.toLowerCase());
+
+                boolean validIncident = breachedIncidentId != null && !breachedIncidentId.contains(incidentId);
+
+                if (createDate != null && updateDate != null && validIncident) {
+                    ZonedDateTime createDateTime = ZonedDateTime.ofInstant(createDate.toInstant(), ZoneId.systemDefault());
+                    int slaHours = allowedTime / 60;
+                    ZonedDateTime breachDateTime = slaCalculator.calculateBreachDateTime(createDateTime, slaHours);
+                    Duration duration = Duration.between(createDateTime, now);
+                    long breachMinutes = duration.toMinutes();
+
+                    if (resolutionDate != null) {
+                        ZonedDateTime resolutionDateTime = ZonedDateTime.ofInstant(resolutionDate.toInstant(), ZoneId.systemDefault());
+                        if (resolutionDateTime.isBefore(breachDateTime)) {
+                            Duration between = Duration.between(createDateTime, resolutionDateTime);
+                            avgTime += between.toMinutes();
+                            continue;
+                        } else {
+                            breachedCount++;
+                            notResolvedBreachedIncidentId.add(incidentId);
+                            continue;
+                        }
+                    }
+
+                    totalMinutes = allowedTime - breachMinutes;
+                    if (totalMinutes > 0) {
+                        String formattedTime = formatDuration(totalMinutes);
+                        AlertData alertData = new AlertData();
+                        alertData.setIncidentId(incidentId);
+                        alertData.setTimeToResolve(formattedTime);
+                        alertDataList.add(alertData);
+                    } else {
+                        breachedCount++;
+                        notResolvedBreachedIncidentId.add(incidentId);
+                    }
+                }
+            }
+        }
+
+        slaTicketData.setBreachedIncidentId(notResolvedBreachedIncidentId);
+        log.info("calculateMeanTimeToResolution() Breached incident ids: {}", notResolvedBreachedIncidentId);
+        slaTicketData.setAlertData(alertDataList);
+        slaTicketData.setNoOfBreachedTicket(breachedCount);
+        slaTicketData.setAvgResolutionTime(alerts.size() > 0 ? avgTime / alerts.size() : 120);
+
+        String logMessage = "Number of issues Resolve Time Breached: ";
+        log.info(logMessage + breachedCount);
+        log.info("calculateMeanTimeToResolution() end.");
+        return slaTicketData;
+    }
+
+    public int getAcknowledgeTimeByPriority(String priorityLevel) {
+        Map<String, Integer> slaMap = new HashMap<>();
+        slaMap.put("critical", 60);
+        slaMap.put("high", 120);
+        slaMap.put("medium", 240);
+        slaMap.put("low", 360);
+        return slaMap.getOrDefault(priorityLevel, 360);
+    }
+
+    private int getResolveTimeByPriority(String priority) {
+        Map<String, Integer> slaMap = new HashMap<>();
+        slaMap.put("critical", 120);
+        slaMap.put("high", 228);
+        slaMap.put("medium", 384);
+        slaMap.put("low", 1152);
+        return slaMap.getOrDefault(priority, 1152);
+    }
+
+    private String formatDuration(long minutes) {
+        long hours = minutes / 60;
+        long remainingMinutes = minutes % 60;
+        if (hours > 0) {
+            return String.format("%d Hours %d Minutes", hours, remainingMinutes);
+        } else {
+            return String.format("%d Minutes", remainingMinutes);
+        }
+    }
+}
+
+-----------------------------
+SlaCalculator.class
+
+import org.springframework.stereotype.Component;
+
+import java.time.DayOfWeek;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.ZonedDateTime;
+
+@Component
+public class SlaCalculator {
+
+    private static final LocalTime WORK_START = LocalTime.of(9, 0);
+    private static final LocalTime WORK_END = LocalTime.of(17, 0);
+    private static final int WORK_HOURS_PER_DAY = 8;
+
+    public ZonedDateTime calculateBreachDateTime(ZonedDateTime createdDate, int slaHours) {
+        LocalDateTime localDateTime = createdDate.toLocalDateTime();
+        int remainingSlaHours = slaHours;
+
+        while (remainingSlaHours > 0) {
+            LocalTime currentTime = localDateTime.toLocalTime();
+            int hoursUntilWorkEnd = WORK_END.getHour() - currentTime.getHour();
+
+            if (currentTime.isBefore(WORK_START)) {
+                localDateTime = localDateTime.withHour(WORK_START.getHour()).withMinute(0).withSecond(0);
+                hoursUntilWorkEnd = WORK_HOURS_PER_DAY;
+            }
+
+            if (currentTime.isAfter(WORK_END)) {
+                localDateTime = localDateTime.plusDays(1).withHour(WORK_START.getHour()).withMinute(0).withSecond(0);
+                hoursUntilWorkEnd = WORK_HOURS_PER_DAY;
+            }
+
+            int hoursToAdd = Math.min(remainingSlaHours, hoursUntilWorkEnd);
+            localDateTime = localDateTime.plusHours(hoursToAdd);
+            remainingSlaHours -= hoursToAdd;
+
+            if (remainingSlaHours > 0 && localDateTime.toLocalTime().equals(WORK_END)) {
+                localDateTime = moveToNextWorkDay(localDateTime);
+            }
+        }
+
+        return localDateTime.atZone(createdDate.getZone());
+    }
+
+    private LocalDateTime moveToNextWorkDay(LocalDateTime localDateTime) {
+        do {
+            localDateTime = localDateTime.plusDays(1).withHour(WORK_START.getHour()).withMinute(0).withSecond(0);
+        } while (localDateTime.getDayOfWeek() == DayOfWeek.SATURDAY || localDateTime.getDayOfWeek() == DayOfWeek.SUNDAY);
+        return localDateTime;
+    }
+}
+
+-----------------------------------------------
+ResponseTransformer.class
+
+public class ResponseTransformer {
+    public AlertsSlaData alertsMapToAlertSlaResponse(SlaTicketData meanTimeToAcknowledgeAlerts, SlaTicketData meanTimeToResolutionAlerts, long totalNoOfAlerts) {
+        AlertsSlaData alertsSlaData = new AlertsSlaData();
+
+        int noOfIssuesResolveTimeBreached = 0;
+        int noOfIssuesAcknowledgeTimeBreached = 0;
+
+        List<AlertData> ticketAcknowledge = new ArrayList<>();
+        if (!CollectionUtils.isEmpty(meanTimeToAcknowledgeAlerts.getAlertData())) {
+            for (AlertData alertData : meanTimeToAcknowledgeAlerts.getAlertData()) {
+                AlertData data = new AlertData();
+                data.setIncidentId(alertData.getIncidentId());
+                data.setTimeToAcknowledge(alertData.getTimeToAcknowledge());
+                ticketAcknowledge.add(data);
+            }
+        }
+        alertsSlaData.setTicketAcknowledge(ticketAcknowledge);
+
+        List<AlertData> ticketResolve = new ArrayList<>();
+        if (!CollectionUtils.isEmpty(meanTimeToResolutionAlerts.getAlertData())) {
+            for (AlertData alertData : meanTimeToResolutionAlerts.getAlertData()) {
+                AlertData data = new AlertData();
+                data.setIncidentId(alertData.getIncidentId());
+                data.setTimeToResolve(alertData.getTimeToResolve());
+                ticketResolve.add(data);
+            }
+        }
+        alertsSlaData.setTicketResolve(ticketResolve);
+
+        noOfIssuesAcknowledgeTimeBreached = meanTimeToAcknowledgeAlerts.getNoOfBreachedTicket();
+        noOfIssuesResolveTimeBreached = meanTimeToResolutionAlerts.getNoOfBreachedTicket();
+        long totalBreachedCount = noOfIssuesAcknowledgeTimeBreached + noOfIssuesResolveTimeBreached;
+
+        double slaPercentage = calculateSlaPercentage(totalBreachedCount, totalNoOfAlerts);
+        PerformanceStatistics statistics = new PerformanceStatistics();
+        statistics.setSlaCompliance(slaPercentage);
+        statistics.setAvgResponseTime(formatDuration(meanTimeToAcknowledgeAlerts.getAvgResponseTime()));
+        statistics.setAvgResolutionTime(formatDuration(meanTimeToResolutionAlerts.getAvgResolutionTime()));
+
+        alertsSlaData.setStatistics(statistics);
+        return alertsSlaData;
+    }
+
+    private double calculateSlaPercentage(long totalBreachedCount, long totalNoOfAlerts) {
+        return totalNoOfAlerts > 0 ? ((double) (totalNoOfAlerts - totalBreachedCount) / totalNoOfAlerts) * 100 : 0;
+    }
+
+    private String formatDuration(long minutes) {
+        long hours = minutes / 60;
+        long remainingMinutes = minutes % 60;
+        if (hours > 0) {
+            return String.format("%d Hours %d Minutes", hours, remainingMinutes);
+        } else {
+            return String.format("%d Minutes", remainingMinutes);
+        }
+    }
+}
+
+
+----------------------------------
+model classes
+
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public class AlertData {
+    private String incidentId;
+    private String timeToAcknowledge;
+    private String TimeToResolve;
+    private String slaCompliance;
+    private Long minutes;
+}
+
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public class AlertsSlaData {
+    private List<AlertData> ticketAcknowledge;
+    private List<AlertData> ticketResolve;
+    private PerformanceStatistics statistics;
+}
+
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public class PerformanceStatistics {
+    private double slaCompliance;
+    private String avgResponseTime;
+    private String avgResolutionTime;
+}
+
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public class SlaTicketData {
+    private List<AlertData> alertData;
+    private int noOfBreachedTicket;
+    private long avgResponseTime;
+    private long avgResolutionTime;
+
+    private List<String> breachedIncidentId;
+}
+
+
+@JsonInclude(JsonInclude.Include.NON_EMPTY)
+public class ResponsePayload {
+    private String message;
+
+    @Schema(description = "List of alert details.")
+    private List<AlertDetails> alertDetailsList;
+
+    @Schema(description = "List of live ticket status")
+    private List<Map<String, Object>> ticketStatus;
+
+    @Schema(description = "List of live ticket distribution")
+    private List<TicketDistribution> ticketDistributionList;
+
+    @Schema(description = "List of ticket mine time to acknowledge")
+    private AlertsSlaData alertsSlaData;
+
+    private List<AlertData> alertDataList;
+
+    @JsonIgnore
+    HttpStatus httpStatus;
+
+}
